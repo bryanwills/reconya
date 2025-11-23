@@ -6,6 +6,8 @@ import (
 	"log"
 	"net"
 	"net/http"
+	"time"
+
 	"reconya-ai/internal/config"
 	"reconya-ai/internal/device"
 	"reconya-ai/internal/eventlog"
@@ -14,12 +16,41 @@ import (
 	"reconya-ai/models"
 )
 
+var (
+	dockerRanges = []string{
+		"172.17.0.0/16", "172.18.0.0/16", "172.19.0.0/16", "172.20.0.0/16",
+		"172.21.0.0/16", "172.22.0.0/16", "172.23.0.0/16", "172.24.0.0/16",
+		"172.25.0.0/16", "172.26.0.0/16", "172.27.0.0/16", "172.28.0.0/16",
+		"172.29.0.0/16", "172.30.0.0/16", "172.31.0.0/16",
+	}
+
+	privateRanges = []string{
+		"192.168.0.0/16",
+		"10.0.0.0/8",
+	}
+
+	httpClient = &http.Client{Timeout: 10 * time.Second}
+)
+
 type NicIdentifierService struct {
-	NetworkService      *network.NetworkService
-	SystemStatusService *systemstatus.SystemStatusService
-	EventLogService     *eventlog.EventLogService
-	DeviceService       *device.DeviceService
-	Config              *config.Config
+	networkService      *network.NetworkService
+	systemStatusService *systemstatus.SystemStatusService
+	eventLogService     *eventlog.EventLogService
+	deviceService       *device.DeviceService
+	config              *config.Config
+	logger              *log.Logger
+}
+
+type DetectedNetwork struct {
+	CIDR      string `json:"cidr"`
+	Interface string `json:"interface"`
+	IP        string `json:"ip"`
+}
+
+type interfaceInfo struct {
+	name string
+	ip   net.IP
+	cidr string
 }
 
 func NewNicIdentifierService(
@@ -27,407 +58,295 @@ func NewNicIdentifierService(
 	systemStatusService *systemstatus.SystemStatusService,
 	eventLogService *eventlog.EventLogService,
 	deviceService *device.DeviceService,
-	config *config.Config) *NicIdentifierService {
+	cfg *config.Config,
+) *NicIdentifierService {
 	return &NicIdentifierService{
-		NetworkService:      networkService,
-		SystemStatusService: systemStatusService,
-		EventLogService:     eventLogService,
-		DeviceService:       deviceService,
-		Config:              config,
+		networkService:      networkService,
+		systemStatusService: systemStatusService,
+		eventLogService:     eventLogService,
+		deviceService:       deviceService,
+		config:              cfg,
+		logger:              log.Default(),
 	}
 }
 
 func (s *NicIdentifierService) Identify() {
-	log.Printf("Attempting network identification")
+	s.logger.Println("Starting network identification")
+
 	nic := s.getLocalNic()
-	fmt.Printf("NIC: %v\n", nic)
-	
-	// Check for new networks and suggest creation
-	s.CheckForNewNetworks()
-	
-	publicIP, err := s.getPublicIp()
-	if err != nil {
-		log.Printf("Failed to get public IP: %v", err)
+	if nic.IPv4 == "" {
+		s.logger.Println("No local NIC found")
 		return
 	}
-	log.Printf("Public IP Address found: [%v]", publicIP)
+	s.logger.Printf("Local NIC: %s (%s)", nic.Name, nic.IPv4)
 
-	// Try to find an existing network for the primary NIC for system status
-	var networkEntity *models.Network
-	if nic.IPv4 != "" {
-		// Calculate the /24 network for this IP
-		ip := net.ParseIP(nic.IPv4)
-		if ip != nil {
-			ip4 := ip.To4()
-			if ip4 != nil {
-				// Calculate /24 network
-				cidr := fmt.Sprintf("%d.%d.%d.0/24", ip4[0], ip4[1], ip4[2])
-				log.Printf("Looking for existing network for primary NIC: %s", cidr)
-				
-				// Only look for existing network, don't create automatically
-				existing, err := s.NetworkService.FindByCIDR(cidr)
-				if err != nil {
-					log.Printf("Error searching for network %s: %v", cidr, err)
-				} else if existing != nil {
-					log.Printf("Found existing network: %s", existing.CIDR)
-					networkEntity = existing
-				} else {
-					log.Printf("No existing network found for %s - will be suggested via UI", cidr)
-				}
-			}
-		}
+	s.CheckForNewNetworks()
+
+	networkEntity := s.findNetworkForIP(nic.IPv4)
+
+	localDevice, err := s.createLocalDevice(nic)
+	if err != nil {
+		s.logger.Printf("Failed to create local device: %v", err)
+		return
 	}
 
-	localDevice := models.Device{
+	if err := s.updateSystemStatus(localDevice, networkEntity); err != nil {
+		s.logger.Printf("Failed to update system status: %v", err)
+		return
+	}
+
+	s.logDiscoveryEvents(localDevice.ID)
+}
+
+func (s *NicIdentifierService) findNetworkForIP(ipStr string) *models.Network {
+	ip := net.ParseIP(ipStr)
+	if ip == nil {
+		return nil
+	}
+
+	ip4 := ip.To4()
+	if ip4 == nil {
+		return nil
+	}
+
+	cidr := fmt.Sprintf("%d.%d.%d.0/24", ip4[0], ip4[1], ip4[2])
+	existing, err := s.networkService.FindByCIDR(cidr)
+	if err != nil {
+		s.logger.Printf("Error searching for network %s: %v", cidr, err)
+		return nil
+	}
+
+	if existing != nil {
+		s.logger.Printf("Found existing network: %s", existing.CIDR)
+	}
+	return existing
+}
+
+func (s *NicIdentifierService) createLocalDevice(nic models.NIC) (*models.Device, error) {
+	localDevice := &models.Device{
 		Name:   nic.Name,
 		IPv4:   nic.IPv4,
 		Status: models.DeviceStatusOnline,
 	}
+	return s.deviceService.CreateOrUpdate(localDevice)
+}
 
-	savedDevice, err := s.DeviceService.CreateOrUpdate(&localDevice)
+func (s *NicIdentifierService) updateSystemStatus(device *models.Device, networkEntity *models.Network) error {
+	publicIP, err := s.getPublicIP()
 	if err != nil {
-		log.Printf("Failed to save or update local device: %v", err)
-		return
+		s.logger.Printf("Failed to get public IP: %v", err)
+		publicIP = ""
+	} else {
+		s.logger.Printf("Public IP: %s", publicIP)
 	}
 
-	systemStatus := models.SystemStatus{
-		LocalDevice: *savedDevice,
+	status := models.SystemStatus{
+		LocalDevice: *device,
 		PublicIP:    &publicIP,
 	}
 
-	// Set NetworkID if we have a valid network entity
 	if networkEntity != nil {
-		systemStatus.NetworkID = networkEntity.ID
+		status.NetworkID = networkEntity.ID
 	}
 
-	// Fetch geolocation for public IP
 	if publicIP != "" {
-		geo, err := s.SystemStatusService.FetchGeolocation(publicIP)
-		if err == nil && geo != nil {
-			systemStatus.Geolocation = geo
-			log.Printf("Added geolocation for public IP %s: %s, %s", publicIP, geo.City, geo.Country)
-		} else if err != nil {
-			log.Printf("Failed to fetch geolocation for public IP %s: %v", publicIP, err)
+		if geo, err := s.systemStatusService.FetchGeolocation(publicIP); err == nil && geo != nil {
+			status.Geolocation = geo
+			s.logger.Printf("Geolocation: %s, %s", geo.City, geo.Country)
 		}
 	}
 
-	_, err = s.SystemStatusService.CreateOrUpdate(&systemStatus)
-	if err != nil {
-		log.Printf("Failed to create or update system status: %v", err)
-		return
-	}
+	_, err = s.systemStatusService.CreateOrUpdate(&status)
+	return err
+}
 
-	device := savedDevice.ID
-	s.EventLogService.CreateOne(&models.EventLog{
+func (s *NicIdentifierService) logDiscoveryEvents(deviceID string) {
+	s.eventLogService.CreateOne(&models.EventLog{
 		Type:     models.LocalIPFound,
-		DeviceID: &device,
+		DeviceID: &deviceID,
 	})
-
-	s.EventLogService.CreateOne(&models.EventLog{
+	s.eventLogService.CreateOne(&models.EventLog{
 		Type: models.LocalNetworkFound,
 	})
 }
 
 func (s *NicIdentifierService) getLocalNic() models.NIC {
-	interfaces, err := net.Interfaces()
-	if err != nil {
-		log.Println("Error getting network interfaces:", err)
-		return models.NIC{}
-	}
+	interfaces := s.getActiveInterfaces()
 
-	var candidates []models.NIC
-	var dockerInterfaces []models.NIC
-
+	var candidates, dockerNics []models.NIC
 	for _, iface := range interfaces {
-		fmt.Printf("Checking interface: %s\n", iface.Name)
-		if iface.Flags&net.FlagUp == 0 {
-			fmt.Printf("Skipping %s: interface is down\n", iface.Name)
-			continue
-		}
-		if iface.Flags&net.FlagLoopback != 0 {
-			fmt.Printf("Skipping %s: interface is loopback\n", iface.Name)
-			continue
-		}
-
-		addrs, err := iface.Addrs()
-		if err != nil {
-			fmt.Printf("Skipping %s: error getting addresses: %v\n", iface.Name, err)
-			continue
-		}
-
-		for _, addr := range addrs {
-			ip, _, err := net.ParseCIDR(addr.String())
-			if err != nil || ip.To4() == nil {
-				fmt.Printf("Skipping address %s on %s: not a valid IPv4\n", addr.String(), iface.Name)
-				continue
-			}
-
-			if !ip.IsLoopback() {
-				nic := models.NIC{Name: iface.Name, IPv4: ip.String()}
-				
-				// Check if this is a Docker or container network
-				if s.isDockerOrContainerNetwork(ip.String()) {
-					fmt.Printf("Found Docker/container interface: %s with IPv4: %s\n", iface.Name, ip.String())
-					dockerInterfaces = append(dockerInterfaces, nic)
-				} else {
-					fmt.Printf("Found potential host interface: %s with IPv4: %s\n", iface.Name, ip.String())
-					candidates = append(candidates, nic)
-				}
-			}
+		nic := models.NIC{Name: iface.name, IPv4: iface.ip.String()}
+		if s.isDockerNetwork(iface.ip) {
+			dockerNics = append(dockerNics, nic)
+		} else {
+			candidates = append(candidates, nic)
 		}
 	}
 
-	// Prefer non-Docker interfaces
-	if len(candidates) > 0 {
-		// Prioritize common home/office networks
-		for _, nic := range candidates {
-			if s.isCommonPrivateNetwork(nic.IPv4) {
-				fmt.Printf("Selected preferred interface: %s with IPv4: %s\n", nic.Name, nic.IPv4)
-				return nic
-			}
+	for _, nic := range candidates {
+		if s.isPrivateNetwork(net.ParseIP(nic.IPv4)) {
+			return nic
 		}
-		// If no common private networks, return first candidate
-		fmt.Printf("Selected first non-Docker interface: %s with IPv4: %s\n", candidates[0].Name, candidates[0].IPv4)
+	}
+
+	if len(candidates) > 0 {
 		return candidates[0]
 	}
 
-	// Fallback to Docker interfaces if no others available
-	if len(dockerInterfaces) > 0 {
-		fmt.Printf("Using Docker interface as fallback: %s with IPv4: %s\n", dockerInterfaces[0].Name, dockerInterfaces[0].IPv4)
-		return dockerInterfaces[0]
+	if len(dockerNics) > 0 {
+		return dockerNics[0]
 	}
 
 	return models.NIC{}
 }
 
-// isDockerOrContainerNetwork checks if an IP belongs to common container networks
-func (s *NicIdentifierService) isDockerOrContainerNetwork(ip string) bool {
-	// Common Docker and container network ranges
-	dockerRanges := []string{
-		"172.17.0.0/16",    // Default Docker bridge
-		"172.18.0.0/16",    // Docker custom networks
-		"172.19.0.0/16",
-		"172.20.0.0/16",
-		"172.21.0.0/16",
-		"172.22.0.0/16",
-		"172.23.0.0/16",
-		"172.24.0.0/16",
-		"172.25.0.0/16",
-		"172.26.0.0/16",
-		"172.27.0.0/16",
-		"172.28.0.0/16",
-		"172.29.0.0/16",
-		"172.30.0.0/16",
-		"172.31.0.0/16",
-	}
+func (s *NicIdentifierService) getActiveInterfaces() []interfaceInfo {
+	var result []interfaceInfo
 
-	parsedIP := net.ParseIP(ip)
-	if parsedIP == nil {
-		return false
-	}
-
-	for _, cidr := range dockerRanges {
-		_, network, err := net.ParseCIDR(cidr)
-		if err != nil {
-			continue
-		}
-		if network.Contains(parsedIP) {
-			return true
-		}
-	}
-	return false
-}
-
-// isCommonPrivateNetwork checks if an IP belongs to common home/office networks
-func (s *NicIdentifierService) isCommonPrivateNetwork(ip string) bool {
-	// Common home/office network ranges
-	commonRanges := []string{
-		"192.168.0.0/16",   // Most common home networks
-		"10.0.0.0/8",       // Corporate networks
-	}
-
-	parsedIP := net.ParseIP(ip)
-	if parsedIP == nil {
-		return false
-	}
-
-	for _, cidr := range commonRanges {
-		_, network, err := net.ParseCIDR(cidr)
-		if err != nil {
-			continue
-		}
-		if network.Contains(parsedIP) {
-			return true
-		}
-	}
-	return false
-}
-
-func (s *NicIdentifierService) getPublicIp() (string, error) {
-	resp, err := http.Get("https://api.ipify.org")
+	interfaces, err := net.Interfaces()
 	if err != nil {
-		return "", err
+		s.logger.Printf("Error getting interfaces: %v", err)
+		return result
+	}
+
+	for _, iface := range interfaces {
+		if iface.Flags&net.FlagUp == 0 || iface.Flags&net.FlagLoopback != 0 {
+			continue
+		}
+
+		addrs, err := iface.Addrs()
+		if err != nil {
+			continue
+		}
+
+		for _, addr := range addrs {
+			ipNet, ok := addr.(*net.IPNet)
+			if !ok {
+				continue
+			}
+
+			ip := ipNet.IP.To4()
+			if ip == nil || ip.IsLoopback() {
+				continue
+			}
+
+			result = append(result, interfaceInfo{
+				name: iface.Name,
+				ip:   ip,
+				cidr: ipNet.String(),
+			})
+		}
+	}
+
+	return result
+}
+
+func (s *NicIdentifierService) isDockerNetwork(ip net.IP) bool {
+	return s.ipInRanges(ip, dockerRanges)
+}
+
+func (s *NicIdentifierService) isPrivateNetwork(ip net.IP) bool {
+	return s.ipInRanges(ip, privateRanges)
+}
+
+func (s *NicIdentifierService) ipInRanges(ip net.IP, ranges []string) bool {
+	if ip == nil {
+		return false
+	}
+	for _, cidr := range ranges {
+		_, network, err := net.ParseCIDR(cidr)
+		if err != nil {
+			continue
+		}
+		if network.Contains(ip) {
+			return true
+		}
+	}
+	return false
+}
+
+func (s *NicIdentifierService) getPublicIP() (string, error) {
+	resp, err := httpClient.Get("https://api.ipify.org")
+	if err != nil {
+		return "", fmt.Errorf("failed to fetch public IP: %w", err)
 	}
 	defer resp.Body.Close()
 
 	ip, err := io.ReadAll(resp.Body)
 	if err != nil {
-		return "", err
+		return "", fmt.Errorf("failed to read response: %w", err)
 	}
 	return string(ip), nil
 }
 
-// CheckForNewNetworks detects new networks from active NICs and suggests creation
 func (s *NicIdentifierService) CheckForNewNetworks() {
-	log.Printf("Checking for new networks...")
-	
-	interfaces, err := net.Interfaces()
-	if err != nil {
-		log.Printf("Error getting network interfaces for network detection: %v", err)
-		return
-	}
+	interfaces := s.getActiveInterfaces()
 
-	var detectedNetworks []string
-	
 	for _, iface := range interfaces {
-		if iface.Flags&net.FlagUp == 0 || iface.Flags&net.FlagLoopback != 0 {
+		if s.isDockerNetwork(iface.ip) {
 			continue
 		}
 
-		addrs, err := iface.Addrs()
+		ipNet, err := parseNetworkCIDR(iface.cidr)
 		if err != nil {
 			continue
 		}
 
-		for _, addr := range addrs {
-			ipNet, ok := addr.(*net.IPNet)
-			if !ok {
-				continue
-			}
-			
-			ip := ipNet.IP.To4()
-			if ip == nil || ip.IsLoopback() {
-				continue
-			}
-
-			// Skip Docker/container networks
-			if s.isDockerOrContainerNetwork(ip.String()) {
-				continue
-			}
-
-			// Calculate network CIDR
-			networkCIDR := ipNet.String()
-			detectedNetworks = append(detectedNetworks, networkCIDR)
-			
-			log.Printf("Detected active network: %s on interface %s", networkCIDR, iface.Name)
-		}
-	}
-	
-	// Check if detected networks exist in database
-	for _, networkCIDR := range detectedNetworks {
-		s.checkAndSuggestNetwork(networkCIDR)
+		s.suggestNetworkIfNew(ipNet, iface.name)
 	}
 }
 
-// checkAndSuggestNetwork checks if a network exists and creates suggestion if not
-func (s *NicIdentifierService) checkAndSuggestNetwork(networkCIDR string) {
-	// Parse the network to get the base network address
-	_, ipNet, err := net.ParseCIDR(networkCIDR)
-	if err != nil {
-		log.Printf("Error parsing network CIDR %s: %v", networkCIDR, err)
-		return
-	}
-	
-	// Get the network address (not the host IP)
-	networkAddr := ipNet.IP.String()
+func (s *NicIdentifierService) suggestNetworkIfNew(ipNet *net.IPNet, ifaceName string) {
+	networkIP := ipNet.IP.Mask(ipNet.Mask)
 	ones, _ := ipNet.Mask.Size()
-	baseNetworkCIDR := fmt.Sprintf("%s/%d", networkAddr, ones)
-	
-	log.Printf("Checking if network %s exists (derived from %s)", baseNetworkCIDR, networkCIDR)
-	
-	// Check if this network already exists
-	existing, err := s.NetworkService.FindByCIDR(baseNetworkCIDR)
-	if err != nil {
-		log.Printf("Error checking existing network %s: %v", baseNetworkCIDR, err)
+	baseCIDR := fmt.Sprintf("%s/%d", networkIP.String(), ones)
+
+	existing, err := s.networkService.FindByCIDR(baseCIDR)
+	if err != nil || existing != nil {
 		return
 	}
-	
-	if existing != nil {
-		log.Printf("Network %s already exists, skipping suggestion", baseNetworkCIDR)
-		return
-	}
-	
-	// Network doesn't exist - log suggestion event
-	log.Printf("New network detected: %s", baseNetworkCIDR)
-	s.EventLogService.CreateOne(&models.EventLog{
+
+	s.logger.Printf("New network detected: %s on %s", baseCIDR, ifaceName)
+	s.eventLogService.CreateOne(&models.EventLog{
 		Type:        models.NewNetworkDetected,
-		Description: fmt.Sprintf("New network %s detected. Consider creating it for scanning.", baseNetworkCIDR),
+		Description: fmt.Sprintf("New network %s detected on %s", baseCIDR, ifaceName),
 	})
 }
 
-// GetDetectedNetworks returns a list of detected networks that don't exist in the database
 func (s *NicIdentifierService) GetDetectedNetworks() []DetectedNetwork {
 	var detected []DetectedNetwork
-	
-	interfaces, err := net.Interfaces()
-	if err != nil {
-		log.Printf("Error getting network interfaces: %v", err)
-		return detected
-	}
 
+	interfaces := s.getActiveInterfaces()
 	for _, iface := range interfaces {
-		if iface.Flags&net.FlagUp == 0 || iface.Flags&net.FlagLoopback != 0 {
+		if s.isDockerNetwork(iface.ip) {
 			continue
 		}
 
-		addrs, err := iface.Addrs()
+		ipNet, err := parseNetworkCIDR(iface.cidr)
 		if err != nil {
 			continue
 		}
 
-		for _, addr := range addrs {
-			ipNet, ok := addr.(*net.IPNet)
-			if !ok {
-				continue
-			}
-			
-			ip := ipNet.IP.To4()
-			if ip == nil || ip.IsLoopback() {
-				continue
-			}
+		networkIP := ipNet.IP.Mask(ipNet.Mask)
+		ones, _ := ipNet.Mask.Size()
+		baseCIDR := fmt.Sprintf("%s/%d", networkIP.String(), ones)
 
-			// Skip Docker/container networks
-			if s.isDockerOrContainerNetwork(ip.String()) {
-				continue
-			}
-
-			// Calculate base network CIDR (network address, not host IP)
-			ones, _ := ipNet.Mask.Size()
-			// Apply mask to get network address
-			networkIP := ipNet.IP.Mask(ipNet.Mask)
-			baseNetworkCIDR := fmt.Sprintf("%s/%d", networkIP.String(), ones)
-			
-			// Check if this network exists
-			existing, err := s.NetworkService.FindByCIDR(baseNetworkCIDR)
-			if err != nil || existing != nil {
-				continue
-			}
-			
-			// Add to detected networks
-			detected = append(detected, DetectedNetwork{
-				CIDR:      baseNetworkCIDR,
-				Interface: iface.Name,
-				IP:        ip.String(),
-			})
+		existing, err := s.networkService.FindByCIDR(baseCIDR)
+		if err != nil || existing != nil {
+			continue
 		}
+
+		detected = append(detected, DetectedNetwork{
+			CIDR:      baseCIDR,
+			Interface: iface.name,
+			IP:        iface.ip.String(),
+		})
 	}
-	
+
 	return detected
 }
 
-// DetectedNetwork represents a detected network that doesn't exist in the database
-type DetectedNetwork struct {
-	CIDR      string `json:"cidr"`
-	Interface string `json:"interface"`
-	IP        string `json:"ip"`
+func parseNetworkCIDR(cidr string) (*net.IPNet, error) {
+	_, ipNet, err := net.ParseCIDR(cidr)
+	return ipNet, err
 }
