@@ -1,6 +1,5 @@
 {{define "components/device-modal.html"}}
 <div class="bg-gray-800 border border-green-500 text-green-500 p-6 rounded-lg" data-device-id="{{.ID}}" style="max-width: 800px; margin: 0 auto; width: 90vw;">
-    <!-- Header -->
     <div class="flex justify-between items-center mb-4 pb-3 border-b border-green-500">
         <div class="flex items-center">
             <div class="mr-3">
@@ -13,7 +12,7 @@
             <div>
                 <div class="font-bold text-xl text-white">{{.IPv4}}</div>
                 <div class="text-gray-300 text-sm" id="name-display">{{or .Name (deref .Hostname) "Unnamed Device"}}</div>
-                <input type="text" id="name-edit" class="w-full px-3 py-2 bg-gray-700 text-white border border-green-500 rounded text-sm" 
+                <input type="text" id="name-edit" class="w-full px-3 py-2 bg-gray-700 text-white border border-green-500 rounded text-sm"
                        value="{{or .Name (deref .Hostname)}}" data-original="{{or .Name (deref .Hostname)}}" placeholder="Device name" style="display: none;">
             </div>
         </div>
@@ -32,7 +31,6 @@
         </div>
     </div>
 
-    <!-- Key Info Grid -->
     <div class="grid grid-cols-2 gap-2 mb-3">
         <div>
             <div class="text-gray-400 text-sm">Status</div>
@@ -84,7 +82,6 @@
         </div>
     </div>
 
-    <!-- Comments Section -->
     {{if or (deref .Comment) (eq "true" "true")}}
     <div class="mb-3">
         <div class="text-gray-400 text-sm mb-2">Comments</div>
@@ -93,9 +90,9 @@
                 <div class="text-gray-200 text-sm whitespace-pre-wrap" id="comment-display">{{deref .Comment}}</div>
             </div>
             <div id="comment-edit-section" style="display: none;">
-                <textarea id="comment-edit" class="w-full px-3 py-2 bg-gray-700 text-white border border-green-500 rounded text-sm resize-y" 
-                          placeholder="Add a comment..." 
-                          style="min-height: 60px;" 
+                <textarea id="comment-edit" class="w-full px-3 py-2 bg-gray-700 text-white border border-green-500 rounded text-sm resize-y"
+                          placeholder="Add a comment..."
+                          style="min-height: 60px;"
                           data-original="{{deref .Comment}}"
                           oninput="autoExpandTextarea(this)">{{deref .Comment}}</textarea>
             </div>
@@ -108,7 +105,6 @@
     </div>
     {{end}}
 
-    <!-- Open Ports -->
     {{if gt $open 0}}
     <div class="mb-3">
         <div class="text-gray-400 text-sm mb-2">Ports ({{$open}})</div>
@@ -131,7 +127,6 @@
     </div>
     {{end}}
 
-    <!-- Web Services -->
     {{if and $.ScreenshotsEnabled .WebServices}}
     <div class="mb-3">
         <div class="text-gray-400 text-sm mb-2">Web Services ({{len .WebServices}})</div>
@@ -154,16 +149,13 @@
 </div>
 
 <script>
-// Use window object to avoid redeclaration errors
 if (typeof window.deviceModalIsEditing === 'undefined') {
     window.deviceModalIsEditing = false;
 }
 
 function autoExpandTextarea(textarea) {
-    // Reset height to auto to get the correct scrollHeight
     textarea.style.height = 'auto';
-    // Set height to match content, with minimum height
-    const minHeight = 60; // minimum height in pixels
+    const minHeight = 60;
     const newHeight = Math.max(minHeight, textarea.scrollHeight);
     textarea.style.height = newHeight + 'px';
 }
@@ -177,22 +169,19 @@ function toggleEditMode() {
     const commentEditSection = document.getElementById('comment-edit-section');
     const commentEmptySection = document.getElementById('comment-empty-section');
     const commentEdit = document.getElementById('comment-edit');
-    
+
     if (window.deviceModalIsEditing) {
-        // Switch to edit mode
         nameDisplay.style.display = 'none';
         nameEdit.style.display = 'block';
-        
-        // Hide display and empty sections, show edit section
+
         commentDisplaySection.style.display = 'none';
         commentEmptySection.style.display = 'none';
         commentEditSection.style.display = 'block';
-        
-        // Auto-expand textarea to fit content
+
         setTimeout(() => {
             autoExpandTextarea(commentEdit);
         }, 10);
-        
+
         editButtons.innerHTML = `
             <button type="button" class="bg-green-600 hover:bg-green-700 text-white px-3 py-1.5 rounded text-sm transition-colors" onclick="saveChanges()" title="Save changes">
                 <i class="ti ti-check"></i>
@@ -202,16 +191,14 @@ function toggleEditMode() {
             </button>
         `;
     } else {
-        // Switch to display mode
         nameDisplay.style.display = 'block';
         nameEdit.style.display = 'none';
-        
-        // Hide edit section, show appropriate display section
+
         commentEditSection.style.display = 'none';
         const hasComment = commentEdit.value.trim() !== '';
         commentDisplaySection.style.display = hasComment ? 'block' : 'none';
         commentEmptySection.style.display = hasComment ? 'none' : 'block';
-        
+
         editButtons.innerHTML = `
             <button type="button" class="border border-green-500 text-green-500 hover:bg-green-500 hover:text-white px-3 py-1.5 rounded text-sm transition-colors" onclick="toggleEditMode()" title="Edit device">
                 <i class="ti ti-edit"></i>
@@ -223,11 +210,10 @@ function toggleEditMode() {
 function cancelEdit() {
     const nameEdit = document.getElementById('name-edit');
     const commentEdit = document.getElementById('comment-edit');
-    
-    // Reset to original values
+
     nameEdit.value = nameEdit.getAttribute('data-original') || '';
     commentEdit.value = commentEdit.getAttribute('data-original') || '';
-    
+
     toggleEditMode();
 }
 
@@ -237,43 +223,41 @@ function saveChanges() {
         console.error('Edit buttons not found!');
         return;
     }
-    
+
     const modalContent = editButtons.closest('[data-device-id]');
     if (!modalContent) {
         console.error('Modal content not found!');
         return;
     }
-    
+
     const deviceId = modalContent.dataset.deviceId;
     if (!deviceId) {
         console.error('Device ID not found in modal data!');
         return;
     }
-    
+
     const nameEdit = document.getElementById('name-edit');
     const commentEdit = document.getElementById('comment-edit');
-    
+
     if (!nameEdit || !commentEdit) {
         console.error('Edit fields not found!');
         return;
     }
-    
+
     const updateData = {
         hostname: nameEdit.value,
         comment: commentEdit.value
     };
-    
+
     console.log('Updating device:', deviceId, 'with data:', updateData);
-    
-    // Show saving indicator
+
     editButtons.innerHTML = `
         <button type="button" class="bg-green-600 text-white px-3 py-1.5 rounded text-sm opacity-50 cursor-not-allowed" disabled>
             <span class="animate-spin rounded-full h-3 w-3 border-2 border-white border-t-transparent inline-block mr-1"></span>
             Saving...
         </button>
     `;
-    
-    // Use fetch instead of HTMX to avoid triggering the global modal event listener
+
     fetch(`/api/devices/${deviceId}`, {
         method: 'PUT',
         headers: {
@@ -288,46 +272,46 @@ function saveChanges() {
         return response.text();
     }).then(function(responseText) {
         console.log('Save successful, response:', responseText);
-        // Success - update the display values
         const nameDisplay = document.getElementById('name-display');
         const commentDisplay = document.getElementById('comment-display');
         const commentDisplaySection = document.getElementById('comment-display-section');
         const commentEmptySection = document.getElementById('comment-empty-section');
-        
+
         if (nameDisplay) {
             nameDisplay.textContent = nameEdit.value || '-';
         }
         if (commentDisplay) {
-            // Use textContent to preserve line breaks with CSS white-space: pre-wrap
             commentDisplay.textContent = commentEdit.value;
         }
-        
-        // Show/hide appropriate comment sections
+
         const hasComment = commentEdit.value.trim() !== '';
         if (commentDisplaySection && commentEmptySection) {
             commentDisplaySection.style.display = hasComment ? 'block' : 'none';
             commentEmptySection.style.display = hasComment ? 'none' : 'block';
         }
-        
-        // Switch back to display mode
+
         window.deviceModalIsEditing = false;
         toggleEditMode();
-        
-        // Only refresh if the name changed to avoid unnecessary layout shifts
+
         if (nameEdit.value !== nameEdit.getAttribute('data-original')) {
             const deviceListContainer = document.getElementById('device-list-container');
             const devicesContainer = document.getElementById('devices-container');
             if (deviceListContainer) {
-                htmx.ajax('GET', '/api/device-list', { target: '#device-list-container' });
+                fetch('/api/device-list')
+                    .then(res => res.text())
+                    .then(html => { deviceListContainer.innerHTML = html; })
+                    .catch(err => console.error('Failed to refresh device list:', err));
             }
             if (devicesContainer) {
-                htmx.ajax('GET', '/api/devices', { target: '#devices-container' });
+                fetch('/api/devices')
+                    .then(res => res.text())
+                    .then(html => { devicesContainer.innerHTML = html; })
+                    .catch(err => console.error('Failed to refresh devices:', err));
             }
         }
-        
+
         console.log('Device updated successfully');
-        
-        // Show success toast notification
+
         const toastId = 'deviceSavedToast_' + Date.now();
         const toastHtml = `
             <div class="fixed top-4 right-4 z-50">
@@ -347,26 +331,21 @@ function saveChanges() {
                 </div>
             </div>
         `;
-        
-        // Add toast to body
+
         document.body.insertAdjacentHTML('beforeend', toastHtml);
-        
-        // Auto-remove toast after 3 seconds
+
         setTimeout(() => {
             const toastElement = document.getElementById(toastId);
             if (toastElement) {
                 toastElement.remove();
             }
         }, 3000);
-        
-        // Close the modal
+
         closeModal('deviceModal');
     }).catch(function(error) {
-        // Error handling
         console.error('Failed to update device:', error);
         console.error('Error details:', error.message);
-        
-        // Reset edit buttons
+
         editButtons.innerHTML = `
             <button type="button" class="bg-green-600 hover:bg-green-700 text-white px-3 py-1.5 rounded text-sm transition-colors" onclick="saveChanges()" title="Save changes">
                 <i class="ti ti-check"></i>
@@ -375,8 +354,7 @@ function saveChanges() {
                 <i class="ti ti-x"></i>
             </button>
         `;
-        
-        // Show error message
+
         alert('Failed to update device. Please try again.');
     });
 }
@@ -385,18 +363,17 @@ function openScreenshotModal(url, screenshot) {
     const modal = document.createElement('div');
     modal.className = 'modal show';
     modal.style.cssText = 'display: flex; background-color: rgba(0,0,0,0.8); z-index: 2000;';
-    
-    // Cleanup function
+
     const closeModal = () => {
         modal.remove();
     };
-    
+
     modal.onclick = (e) => {
         if (e.target === modal) {
             closeModal();
         }
     };
-    
+
     modal.innerHTML = `
         <div class="flex justify-center items-center w-full">
             <div class="bg-gray-900 border border-green-500 rounded max-w-6xl w-full mx-4">
@@ -409,7 +386,7 @@ function openScreenshotModal(url, screenshot) {
                     </div>
                 </div>
                 <div class="text-center p-2">
-                    <img src="data:image/png;base64,${screenshot}" alt="Screenshot of ${url}" 
+                    <img src="data:image/png;base64,${screenshot}" alt="Screenshot of ${url}"
                          class="max-w-full max-h-80vh object-contain">
                 </div>
                 <div class="border-t border-green-500 p-4 flex justify-end gap-2">
@@ -421,21 +398,18 @@ function openScreenshotModal(url, screenshot) {
             </div>
         </div>
     `;
-    
-    // Add global close function
+
     window.closeScreenshotModal = function(element) {
         const modal = element.closest('.modal');
         if (modal) {
             modal.remove();
         }
     };
-    
+
     document.body.appendChild(modal);
 }
 
-// Reset editing state when modal is closed
 document.addEventListener('DOMContentLoaded', function() {
-    // Reset editing state when device modal is closed (handled by closeModal function)
     window.deviceModalIsEditing = false;
 });
 </script>

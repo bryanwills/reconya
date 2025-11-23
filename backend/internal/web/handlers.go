@@ -421,11 +421,6 @@ func (h *WebHandler) ServePage(pageName string) http.HandlerFunc {
 		session, _ := h.sessionStore.Get(r, "reconya-session")
 		user := h.getUserFromSession(session)
 		if user == nil {
-			if r.Header.Get("HX-Request") == "true" {
-				w.Header().Set("HX-Redirect", "/login")
-				w.WriteHeader(http.StatusUnauthorized)
-				return
-			}
 			http.Redirect(w, r, "/login", http.StatusSeeOther)
 			return
 		}
@@ -456,13 +451,6 @@ func (h *WebHandler) Home(w http.ResponseWriter, r *http.Request) {
 	session, _ := h.sessionStore.Get(r, "reconya-session")
 	user := h.getUserFromSession(session)
 	if user == nil {
-		// Check if this is an HTMX request
-		if r.Header.Get("HX-Request") == "true" {
-			// For HTMX requests, return a redirect header instead of HTTP redirect
-			w.Header().Set("HX-Redirect", "/login")
-			w.WriteHeader(http.StatusUnauthorized)
-			return
-		}
 		http.Redirect(w, r, "/login", http.StatusSeeOther)
 		return
 	}
@@ -565,11 +553,6 @@ func (h *WebHandler) About(w http.ResponseWriter, r *http.Request) {
 	session, _ := h.sessionStore.Get(r, "reconya-session")
 	user := h.getUserFromSession(session)
 	if user == nil {
-		if r.Header.Get("HX-Request") == "true" {
-			w.Header().Set("HX-Redirect", "/login")
-			w.WriteHeader(http.StatusUnauthorized)
-			return
-		}
 		http.Redirect(w, r, "/login", http.StatusSeeOther)
 		return
 	}
@@ -672,7 +655,7 @@ func (h *WebHandler) Logout(w http.ResponseWriter, r *http.Request) {
 	http.Redirect(w, r, "/login", http.StatusSeeOther)
 }
 
-// API Handlers for HTMX
+// API Handlers
 func (h *WebHandler) APIDevices(w http.ResponseWriter, r *http.Request) {
 	log.Printf("APIDevices: Request received from %s", r.RemoteAddr)
 	session, _ := h.sessionStore.Get(r, "reconya-session")
@@ -2238,7 +2221,6 @@ func (h *WebHandler) APIScanSelectNetwork(w http.ResponseWriter, r *http.Request
 	}
 
 	log.Println("APIScanSelectNetwork completed successfully")
-	w.Header().Set("HX-Trigger", "network-selected")
 	w.WriteHeader(http.StatusOK)
 }
 
